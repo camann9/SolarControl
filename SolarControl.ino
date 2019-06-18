@@ -1,9 +1,8 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
-// Data wire is plugged into port 10 on the Arduino
 #define RELAY_PIN 10
-#define ONE_WIRE_BUS 11
+#define ONE_WIRE_BUS 13
 #define TEMPERATURE_PRECISION 9
 
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
@@ -19,14 +18,14 @@ DeviceAddress hotThermometer = { 0x3B, 0xA8, 0x09, 0x59, 0x09, 0xFC, 0x6C, 0x7B 
 // Thermocouple in tank (green)
 DeviceAddress tankThermometer = { 0x3B, 0x6C, 0xB6, 0x58, 0x09, 0xFC, 0x2C, 0xD1 };
 // Thermocouple in panel (red)
-DeviceAddress panelThermometer = { 0x3B, 0x6C, 0xCE, 0x58, 0x09, 0xFC, 0x2C, 0x82 };
+DeviceAddress panelThermometer = { 0x3B, 0x70, 0xD1, 0x58, 0x09, 0xFC, 0x4C, 0xD2 };
 
 // Define this to manually test system
-#define TEST_SYSTEM
+//#define TEST_SYSTEM
 
 // If the tank becomes too hot the liner breaks. In addition the maximum operating temperature
 // for the pump is 79 degrees and the minimum inlet pressure increases as temp increases:
-// 3 ft of wtaer column at 60 degrees and 9 ft at 88 degrees (we have 4 ft)
+// 3 ft of water column at 60 degrees and 9 ft at 88 degrees (we have 4 ft)
 #ifdef TEST_SYSTEM
   #define MAX_TANK_TEMPERATURE 32
 #else
@@ -34,16 +33,23 @@ DeviceAddress panelThermometer = { 0x3B, 0x6C, 0xCE, 0x58, 0x09, 0xFC, 0x2C, 0x8
 #endif
 
 // Turn pump on if panel is at least this much warmer than tank. If temp diff is too
-// small tis likely means that there isn't much sun and that it's not wort turning on the pump.
+// small this likely means that there isn't much sun and that it's not worth turning on the pump.
 // If there is sun the panels get pretty hot.
 #ifdef TEST_SYSTEM
   #define MIN_PANEL_TEMP_DIFF 5
 #else
-  #define MIN_PANEL_TEMP_DIFF 30
+  #define MIN_PANEL_TEMP_DIFF 10
 #endif
 
-// Start with pump turned off
-int currentPumpState = LOW;
+// Turn pump off if we're not gaining much heat from having it on. no need to waste energy if heat gain is minimal.
+#ifdef TEST_SYSTEM
+  #define MIN_HOT_COLD_TEMP_DIFF 0
+#else
+  #define MIN_HOT_COLD_TEMP_DIFF 1
+#endif
+
+// Start with pump turned on
+int currentPumpState = HIGH;
 
 // Last time that relay was switched (since start of controller in millis)
 unsigned long lastSwitchMillis;
@@ -58,14 +64,33 @@ unsigned long lastPumpOnMillis;
   #define MIN_MS_BETWEEN_SWITCHES (60*1000)
 #endif
 
-// We keep pump off for at most one hour. We want to cycle at least every hour to get
+// Time that we last requested temperatures and controlled the pump. We don't
+// want to call control to often.
+unsigned long lastControlCycleMillis;
+#define MS_BETWEEN_CONTROL_CYCLES 2000
+
+// We keep pump off for at most 20 minutes. We want to cycle at least every 20 minutes to get
 // more accurate temperature readings from tank and panels. If we move water we get better
-// data than from the sensors that just monitor one spot in the tank and one in the panel.
+// data than from the sensors that if we just monitor one spot in the tank and one in the panel
+// with sensors.
 #ifdef TEST_SYSTEM
-  #define MAX_PUMP_OFF_TIME (30*1000)
+  #define MAX_MS_BETWEEN_TEMP_CHECK (30*1000)
 #else
-  #define MAX_PUMP_OFF_TIME (60*60*1000)
+  #define MAX_MS_BETWEEN_TEMP_CHECK (20*60*1000)
 #endif
+// Temperature check only needs to run for 30 seconds. We will get
+// enough hot water to temp sensor in 30 seconds if panels are actually hot
+// to keep the system running.
+#ifdef TEST_SYSTEM
+  #define MIN_MS_TEMP_CHECK (5*1000)
+#else
+  #define MIN_MS_TEMP_CHECK (30*1000)
+#endif
+bool runningTempCheck;
+
+#define SERIAL_BUFFER_SIZE 128
+String serialBuffer;
+bool inputReady = false;
 
 void setup(void)
 {
@@ -82,7 +107,10 @@ void setup(void)
   sensors.setResolution(hotThermometer, TEMPERATURE_PRECISION);
 
   lastSwitchMillis = millis();
-  lastPumpOnMillis = 0;
+  lastPumpOnMillis = millis();
+  lastControlCycleMillis = millis();
+  // Start system in temp check mode
+  runningTempCheck  = true;
 }
 
 // Check temperature for valid range
@@ -92,35 +120,24 @@ bool isValidTemperature(float temp) {
   return temp > -10 && temp < 400;
 }
 
-// function to print a device address
-void printAddress(DeviceAddress deviceAddress)
-{
-  for (uint8_t i = 0; i < 8; i++)
-  {
-    // zero pad the address if necessary
-    if (deviceAddress[i] < 16) Serial.print("0");
-    Serial.print(deviceAddress[i], HEX);
-  }
-}
-
 // function to print the temperature for a device
 void printTemperature(DeviceAddress deviceAddress)
 {
   float tempC = sensors.getTempC(deviceAddress);
   if (isValidTemperature(tempC)) {
-    Serial.print(tempC);
+    output(String(tempC));
   } else {
-    Serial.print("invalid");
+    output("invalid");
   }
 }
 
 // main function to print information about a device
 void printData(DeviceAddress deviceAddress, const char *name)
 {
-  Serial.print(name);
-  Serial.print(": ");
+  output(name);
+  output(": ");
   printTemperature(deviceAddress);
-  Serial.print("; ");
+  output("; ");
 }
 
 
@@ -132,9 +149,10 @@ void controlPump(void) {
   float tempTank = sensors.getTempC(tankThermometer);
   float tempPanel = sensors.getTempC(panelThermometer);
 
-  if (millis() - lastPumpOnMillis > MAX_PUMP_OFF_TIME) {
-    Serial.println("-- Turning pump ON, too long since last cycle");
+  if (millis() - lastPumpOnMillis > MAX_MS_BETWEEN_TEMP_CHECK) {
+    outputln("-- Turning pump ON, too long since last cycle");
     desiredPumpState = HIGH;
+    runningTempCheck = true;
   } else if (currentPumpState == HIGH) {
     // If pump is on we can use temp readings from inlet and return that
     // should be more precise.
@@ -151,16 +169,19 @@ void controlPump(void) {
     // - return water is colder than panel input (no sun).
     if (!isValidTemperature(tempCold)) {
       desiredPumpState = LOW;
-      Serial.println("-- Turning pump OFF, invalid cold temp");
+      outputln("-- Turning pump OFF, invalid cold temp");
     } else if (!isValidTemperature(tempHot) && !isValidTemperature(tempPanel)) {
       desiredPumpState = LOW;
-      Serial.println("-- Turning pump OFF, invalid hot and panel temp");
+      outputln("-- Turning pump OFF, invalid hot and panel temp");
     } else if (tempCold > MAX_TANK_TEMPERATURE) {
       desiredPumpState = LOW;
-      Serial.println("-- Turning pump OFF, tank too hot");
-    } else if (tempCold > tempHot) {
+      outputln("-- Turning pump OFF, tank too hot");
+    } else if (tempHot - tempCold < MIN_HOT_COLD_TEMP_DIFF) {
       desiredPumpState = LOW;
-      Serial.println("-- Turning pump OFF, panel return water colder than panel input");
+      outputln("-- Turning pump OFF, panel return water not much warmer (or colder) than panel input");
+    } else if (isValidTemperature(tempPanel) && tempPanel - tempCold < MIN_HOT_COLD_TEMP_DIFF) {
+      desiredPumpState = LOW;
+      outputln("-- Turning pump OFF, panel not much warmer (or colder) than panel input");
     }
   } else {
     // If pump is off we need to use readings from tank/panel.
@@ -169,47 +190,118 @@ void controlPump(void) {
     if (isValidTemperature(tempPanel) && isValidTemperature(tempTank) && tempTank < MAX_TANK_TEMPERATURE) {
       if (tempPanel - tempTank > MIN_PANEL_TEMP_DIFF) {
         desiredPumpState = HIGH;
-        Serial.println("-- Turning pump ON, panels are hot");
+        outputln("-- Turning pump ON, panels are hot");
       }
     }
   }
 
-  if (desiredPumpState != currentPumpState
-      && millis() - lastSwitchMillis > MIN_MS_BETWEEN_SWITCHES) {
-    // Switch relay if required
-    currentPumpState = desiredPumpState;
-    digitalWrite(RELAY_PIN, currentPumpState);
-    lastSwitchMillis = millis();
+  if (desiredPumpState != currentPumpState) {
+    if (millis() - lastSwitchMillis > MIN_MS_TEMP_CHECK
+        && runningTempCheck
+        && desiredPumpState == LOW) {
+      // Allow quick shutoff if we're currently in temp check mode. We don't
+      // want to pump a lot of warm water through the panels if it's cold
+      // outside.
+      currentPumpState = desiredPumpState;
+      lastSwitchMillis = millis();
+    } else if (millis() - lastSwitchMillis > MIN_MS_BETWEEN_SWITCHES) {
+      // Switch relay if required
+      currentPumpState = desiredPumpState;
+      lastSwitchMillis = millis();
+    } else {
+      outputln("-- Pump state change requested but too short since last state change");
+    }
   }
   if (currentPumpState == HIGH) {
     lastPumpOnMillis = millis();
+  } else {
+    // Turning the pump off ends temp check. If we restart the pump due to another
+    // temp check the  this will become true again. If we restart the pump due to
+    // hot panels the cycle will not be marked as temp check and shutoff time will
+    // be longer to prevent frequent cycling.
+    runningTempCheck = false;
   }
+  digitalWrite(RELAY_PIN, currentPumpState);
 }
 
 void printSystemState(void) {
   if (currentPumpState == HIGH) {
-    Serial.print("Pump is ON. ");
+    output("Pump is ON. ");
   } else {
-    Serial.print("Pump is OFF. ");
+    output("Pump is OFF. ");
   }
-  Serial.print("Seconds since last pump state change: ");
-  Serial.print((millis() - lastSwitchMillis) / 1000);
-  Serial.print(". Seconds since last pump on: ");
-  Serial.println((millis() - lastPumpOnMillis) / 1000);
+  output("Last pump state change: T - ");
+  output(String((millis() - lastSwitchMillis) / 1000));
+  output("s. Last pump on: T - ");
+  output(String((millis() - lastPumpOnMillis) / 1000));
+  output("s. ");
+  
+  if (currentPumpState == HIGH) {
+    if (runningTempCheck) {
+      output("Trigger: temp check, ");
+      if (millis() - lastSwitchMillis > MIN_MS_TEMP_CHECK) {
+        outputln(", could turn off.");
+      } else {
+        output(String((MIN_MS_TEMP_CHECK - (millis() - lastSwitchMillis)) / 1000));
+        outputln("s remaining.");
+      }
+    } else {
+      output("NO temp check.");
+    }
+  } else {
+    outputln("\n");
+  }
 }
 
 void loop(void)
 { 
-  sensors.requestTemperatures();
-  Serial.println("");
+  if (millis() - lastControlCycleMillis > MS_BETWEEN_CONTROL_CYCLES) {
+    lastControlCycleMillis = millis();
+    sensors.requestTemperatures();
+    outputln("");
+  
+    // print the device information
+    printData(coldThermometer, "Cold");
+    printData(hotThermometer, "Hot");
+    printData(tankThermometer, "Tank");
+    printData(panelThermometer, "Panel");
+    outputln("");
+    controlPump();
+    printSystemState();
+  }
+  handleInput();
+}
 
-  // print the device information
-  printData(coldThermometer, "Cold");
-  printData(hotThermometer, "Hot");
-  printData(tankThermometer, "Tank");
-  printData(panelThermometer, "Panel");
-  Serial.println("");
-  controlPump();
-  printSystemState();
-  delay(5000);
+void output(String out) {
+  Serial.print(out);
+}
+
+void outputln(String out) {
+  output(out);
+  output("\n");
+}
+
+void receiveSerialCharacters() {
+  while (Serial.available()) {
+    char inChar = Serial.read();
+    if (inChar == '\n') {
+      inputReady = true;
+    } else if (serialBuffer.length() < SERIAL_BUFFER_SIZE && !inputReady) {
+      // Only accept input if buffer is not overflowing and if we're not currently processing
+      serialBuffer += inChar;
+    }
+  }
+}
+
+void handleInput() {
+  receiveSerialCharacters();
+  if (inputReady) {
+    String inputToHandle = serialBuffer;
+    serialBuffer = "";
+    inputReady = false;
+
+    if (inputToHandle == "p" || inputToHandle == "ping") {
+      Serial.println("pong");
+    }
+  }
 }
