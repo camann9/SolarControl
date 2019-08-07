@@ -76,7 +76,7 @@ unsigned long lastControlCycleMillis;
 #ifdef TEST_SYSTEM
   #define MAX_MS_BETWEEN_TEMP_CHECK (30*1000)
 #else
-  #define MAX_MS_BETWEEN_TEMP_CHECK (20*60*1000)
+  #define MAX_MS_BETWEEN_TEMP_CHECK (30*60*1000)
 #endif
 // Temperature check only needs to run for 30 seconds. We will get
 // enough hot water to temp sensor in 30 seconds if panels are actually hot
@@ -179,9 +179,6 @@ void controlPump(void) {
     } else if (tempHot - tempCold < MIN_HOT_COLD_TEMP_DIFF) {
       desiredPumpState = LOW;
       outputln("-- Turning pump OFF, panel return water not much warmer (or colder) than panel input");
-    } else if (isValidTemperature(tempPanel) && tempPanel - tempCold < MIN_HOT_COLD_TEMP_DIFF) {
-      desiredPumpState = LOW;
-      outputln("-- Turning pump OFF, panel not much warmer (or colder) than panel input");
     }
   } else {
     // If pump is off we need to use readings from tank/panel.
