@@ -2,7 +2,8 @@
 #include <DallasTemperature.h>
 
 #define RELAY_PIN 10
-#define ONE_WIRE_BUS 13
+#define ONE_WIRE_BUS 6
+#define PUMP_WATER_PIN 5
 #define TEMPERATURE_PRECISION 9
 
 // Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
@@ -99,6 +100,10 @@ void setup(void)
 
   // Prepare relay pin
   pinMode(RELAY_PIN, OUTPUT);
+  // The pump water level check has a pullup. When there is no water in the
+  // pump housing (desired state) the state of the pin will be HIGH.
+  // If there is water, the pin will be pulled to GND via the other wire.
+  pinMode(PUMP_WATER_PIN, INPUT_PULLUP);
 
   // set the resolution to 9 bit
   sensors.setResolution(panelThermometer, TEMPERATURE_PRECISION);
@@ -148,8 +153,15 @@ void controlPump(void) {
   float tempHot = sensors.getTempC(hotThermometer);
   float tempTank = sensors.getTempC(tankThermometer);
   float tempPanel = sensors.getTempC(panelThermometer);
+  // Emergency shutoff if there is water in pump housing. Because this pin
+  // uses the internal pullup it is actually connected on LOW.
+  bool emergencyShutoffTriggered = (digitalRead(PUMP_WATER_PIN) == LOW);
 
-  if (millis() - lastPumpOnMillis > MAX_MS_BETWEEN_TEMP_CHECK) {
+  if (millis() - lastPumpOnMillis > MAX_MS_BETWEEN_TEMP_CHECK
+      && (!isValidTemperature(tempTank) || !isValidTemperature(tempPanel) || tempPanel + 10 > tempTank)) {
+    // We run temperature check only of panel temp is at least somewhere close to the tank
+    // tmeperature. If the panel temp is slightly lower than tank temp that's fine, might
+    // be incorrect data. But if it's much lower we don't even need to try.
     outputln("-- Turning pump ON, too long since last cycle");
     desiredPumpState = HIGH;
     runningTempCheck = true;
@@ -192,21 +204,33 @@ void controlPump(void) {
     }
   }
 
+  if (emergencyShutoffTriggered) {
+    output("WATER IN PUMP HOUSING\n");
+    desiredPumpState = LOW;
+  }
+
   if (desiredPumpState != currentPumpState) {
-    if (millis() - lastSwitchMillis > MIN_MS_TEMP_CHECK
+    bool allowStateChange = false;
+    if (emergencyShutoffTriggered) {
+      // Allow quick shutoff if emergency shutoff triggered.
+      allowStateChange = true;
+    } else if (millis() - lastSwitchMillis > MIN_MS_TEMP_CHECK
         && runningTempCheck
         && desiredPumpState == LOW) {
       // Allow quick shutoff if we're currently in temp check mode. We don't
       // want to pump a lot of warm water through the panels if it's cold
       // outside.
-      currentPumpState = desiredPumpState;
-      lastSwitchMillis = millis();
+      allowStateChange = true;
     } else if (millis() - lastSwitchMillis > MIN_MS_BETWEEN_SWITCHES) {
-      // Switch relay if required
-      currentPumpState = desiredPumpState;
-      lastSwitchMillis = millis();
+      // If none of the special conditions are triggered, respect wait time between
+      // relay switches.
+      allowStateChange = true;
     } else {
       outputln("-- Pump state change requested but too short since last state change");
+    }
+    if (allowStateChange) {
+      currentPumpState = desiredPumpState;
+      lastSwitchMillis = millis();
     }
   }
   if (currentPumpState == HIGH) {
