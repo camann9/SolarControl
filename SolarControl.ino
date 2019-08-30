@@ -19,7 +19,7 @@ DeviceAddress hotThermometer = { 0x3B, 0xA8, 0x09, 0x59, 0x09, 0xFC, 0x6C, 0x7B 
 // Thermocouple in tank (green)
 DeviceAddress tankThermometer = { 0x3B, 0x6C, 0xB6, 0x58, 0x09, 0xFC, 0x2C, 0xD1 };
 // Thermocouple in panel (red)
-DeviceAddress panelThermometer = { 0x3B, 0x70, 0xD1, 0x58, 0x09, 0xFC, 0x4C, 0xD2 };
+DeviceAddress panelThermometer = { 0x3B, 0x3C, 0xCD, 0x41, 0x0B, 0xF4, 0x0D, 0x0D };
 
 // Define this to manually test system
 //#define TEST_SYSTEM
@@ -41,6 +41,12 @@ DeviceAddress panelThermometer = { 0x3B, 0x70, 0xD1, 0x58, 0x09, 0xFC, 0x4C, 0xD
 #else
   #define MIN_PANEL_TEMP_DIFF 10
 #endif
+
+// Only do temp check if panels are not significantly colder than tank. If panels are much colder
+// than tank there is no need to run the temp check. We only run it if themperatures are at least
+// close enough for it to be possible to get useful data from temp check. Each temp check loses
+// a lot of energy (all the water in the pipes gets cold) if panels are cold.
+#define MIN_PANEL_TEMP_DIFF_FOR_TEMP_CHECK 10
 
 // Turn pump off if we're not gaining much heat from having it on. no need to waste energy if heat gain is minimal.
 #ifdef TEST_SYSTEM
@@ -66,7 +72,7 @@ unsigned long lastPumpOnMillis;
 #endif
 
 // Time that we last requested temperatures and controlled the pump. We don't
-// want to call control to often.
+// want to call control too often.
 unsigned long lastControlCycleMillis;
 #define MS_BETWEEN_CONTROL_CYCLES 2000
 
@@ -85,7 +91,7 @@ unsigned long lastControlCycleMillis;
 #ifdef TEST_SYSTEM
   #define MIN_MS_TEMP_CHECK (5*1000)
 #else
-  #define MIN_MS_TEMP_CHECK (30*1000)
+  #define MIN_MS_TEMP_CHECK (45*1000)
 #endif
 bool runningTempCheck;
 
@@ -158,7 +164,7 @@ void controlPump(void) {
   bool emergencyShutoffTriggered = (digitalRead(PUMP_WATER_PIN) == LOW);
 
   if (millis() - lastPumpOnMillis > MAX_MS_BETWEEN_TEMP_CHECK
-      && (!isValidTemperature(tempTank) || !isValidTemperature(tempPanel) || tempPanel + 10 > tempTank)) {
+      && (!isValidTemperature(tempTank) || !isValidTemperature(tempPanel) || tempPanel + MIN_PANEL_TEMP_DIFF_FOR_TEMP_CHECK > tempTank)) {
     // We run temperature check only of panel temp is at least somewhere close to the tank
     // tmeperature. If the panel temp is slightly lower than tank temp that's fine, might
     // be incorrect data. But if it's much lower we don't even need to try.
@@ -261,7 +267,7 @@ void printSystemState(void) {
     if (runningTempCheck) {
       output("Trigger: temp check, ");
       if (millis() - lastSwitchMillis > MIN_MS_TEMP_CHECK) {
-        outputln(", could turn off.");
+        outputln("could turn off.");
       } else {
         output(String((MIN_MS_TEMP_CHECK - (millis() - lastSwitchMillis)) / 1000));
         outputln("s remaining.");
