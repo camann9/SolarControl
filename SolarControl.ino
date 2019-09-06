@@ -47,6 +47,8 @@ DeviceAddress panelThermometer = { 0x3B, 0x3C, 0xCD, 0x41, 0x0B, 0xF4, 0x0D, 0x0
 // close enough for it to be possible to get useful data from temp check. Each temp check loses
 // a lot of energy (all the water in the pipes gets cold) if panels are cold.
 #define MIN_PANEL_TEMP_DIFF_FOR_TEMP_CHECK 10
+// Also, no need to run the system if panels are below 25 degrees
+#define MIN_PANEL_TEMP_FOR_TEMP_CHECK 30
 
 // Turn pump off if we're not gaining much heat from having it on. no need to waste energy if heat gain is minimal.
 #ifdef TEST_SYSTEM
@@ -164,7 +166,8 @@ void controlPump(void) {
   bool emergencyShutoffTriggered = (digitalRead(PUMP_WATER_PIN) == LOW);
 
   if (millis() - lastPumpOnMillis > MAX_MS_BETWEEN_TEMP_CHECK
-      && (!isValidTemperature(tempTank) || !isValidTemperature(tempPanel) || tempPanel + MIN_PANEL_TEMP_DIFF_FOR_TEMP_CHECK > tempTank)) {
+      /*&& (!isValidTemperature(tempTank) || !isValidTemperature(tempPanel) || tempPanel + MIN_PANEL_TEMP_DIFF_FOR_TEMP_CHECK > tempTank) */
+      && (!isValidTemperature(tempPanel) || tempPanel > MIN_PANEL_TEMP_FOR_TEMP_CHECK)) {
     // We run temperature check only of panel temp is at least somewhere close to the tank
     // tmeperature. If the panel temp is slightly lower than tank temp that's fine, might
     // be incorrect data. But if it's much lower we don't even need to try.
@@ -201,12 +204,12 @@ void controlPump(void) {
   } else {
     // If pump is off we need to use readings from tank/panel.
 
-    // Only turn pump off if we have temperature data from panel and tank and if tank temp less than maximum.
-    if (isValidTemperature(tempPanel) && isValidTemperature(tempTank) && tempTank < MAX_TANK_TEMPERATURE) {
-      if (tempPanel - tempTank > MIN_PANEL_TEMP_DIFF) {
-        desiredPumpState = HIGH;
-        outputln("-- Turning pump ON, panels are hot");
-      }
+    // Only turn pump on if we have temperature data from panel and tank and if tank temp less than maximum.
+    if (isValidTemperature(tempPanel) && isValidTemperature(tempTank)
+        && tempTank < MAX_TANK_TEMPERATURE
+        && tempPanel - tempTank > MIN_PANEL_TEMP_DIFF) {
+      desiredPumpState = HIGH;
+      outputln("-- Turning pump ON, panels are warmer than tank");
     }
   }
 
@@ -227,7 +230,6 @@ void controlPump(void) {
       // want to pump a lot of warm water through the panels if it's cold
       // outside.
       allowStateChange = true;
-    } else if (millis() - lastSwitchMillis > MIN_MS_BETWEEN_SWITCHES) {
       // If none of the special conditions are triggered, respect wait time between
       // relay switches.
       allowStateChange = true;
@@ -248,6 +250,7 @@ void controlPump(void) {
     // be longer to prevent frequent cycling.
     runningTempCheck = false;
   }
+  
   digitalWrite(RELAY_PIN, currentPumpState);
 }
 
