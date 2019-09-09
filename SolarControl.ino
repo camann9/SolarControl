@@ -230,6 +230,7 @@ void controlPump(void) {
       // want to pump a lot of warm water through the panels if it's cold
       // outside.
       allowStateChange = true;
+    } else if (millis() - lastSwitchMillis > MIN_MS_BETWEEN_SWITCHES) {
       // If none of the special conditions are triggered, respect wait time between
       // relay switches.
       allowStateChange = true;
